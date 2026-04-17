@@ -16,6 +16,61 @@ class IngestionService:
             separators=["\n\n", "\n", " ", ""]
         )
 
+    async def ingest_everything(self, root_path: str):
+        """
+        The method the API is looking for. 
+        Crawls the F: drive and extracts Role/Location metadata.
+        """
+        root = Path(root_path)
+        count = 0
+        
+        # rglob finds all PDFs recursively
+        for file_path in root.rglob("*.pdf"):
+            if "venv" in str(file_path) or ".next" in str(file_path):
+                continue
+            
+            # Logic for: F:/.../backend/{Role}/{Location}/{Filename}
+            parts = file_path.parts
+            role = parts[-3] if len(parts) >= 3 else "General"
+            location = parts[-2] if len(parts) >= 2 else "Unknown"
+            
+            try:
+                loader = PyPDFLoader(str(file_path))
+                pages = loader.load()
+                text = " ".join([p.page_content for p in pages])
+                
+                # 1. Index in ChromaDB (For Vector Search)
+                chroma_service.index_resume(
+                    candidate_id=str(file_path),
+                    text=text,
+                    metadata={
+                        "name": file_path.name,
+                        "role": role,
+                        "location": location,
+                        "path": str(file_path)
+                    }
+                )
+
+                # 2. Store in MongoDB (For Persistent Record)
+                await db.candidates.update_one(
+                    {"path": str(file_path)},
+                    {"$set": {
+                        "name": file_path.name, 
+                        "role": role, 
+                        "location": location, 
+                        "text": text[:500] # Storing preview text
+                    }},
+                    upsert=True
+                )
+                
+                count += 1
+                print(f"✅ Indexed: {file_path.name} in {location}")
+                
+            except Exception as e:
+                print(f"❌ Failed to index {file_path.name}: {str(e)}")
+                
+        return count
+
     async def process_pdf(self, file_path: str, candidate_id: str):
         """
         Phase 1: Ingestion & Vectorization (The Library) [cite: 346]
